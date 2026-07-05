@@ -74,7 +74,8 @@ jobs:
               echo "deb-src http://deb.debian.org/debian $DEB_RELEASE main" >> /etc/apt/sources.list
               apt-get update
 
-              # ----- 安装构建依赖 -----
+              # ----- 安装构建依赖（含 devscripts，提供 dch）-----
+              apt-get install -y devscripts
               apt-get build-dep -y mpd
 
               # ----- 下载 MPD 源码 -----
