@@ -1,0 +1,147 @@
+# =============================================================================
+# 编译 MPD（Debian arm64, 禁用 io_uring）
+#
+# 背景：
+#   MPD 0.24+ 默认启用 io_uring I/O 后端，这会导致 iowait 虚高和 CPU 温度
+#   升高（内核统计层面 bug + 内核线程轮询阻止 CPU 进入深度 C-state）。
+#   详见 https://github.com/MusicPlayerDaemon/MPD/issues/2241
+#
+# 本 workflow 在 arm64 Debian 容器中编译 MPD，禁用 io_uring，回退到传统 I/O
+# 后端，无感知的性能损失。
+#
+# 触发方式：
+#   - workflow_dispatch（手动触发，可选择 Debian 版本）
+#   - 定时：每月 1 日 06:00 UTC 自动编译最新版
+# =============================================================================
+
+name: 编译 MPD（arm64, 禁用 io_uring）
+
+on:
+  workflow_dispatch:
+    inputs:
+      debian_release:
+        description: 'Debian 版本（trixie=13, bookworm=12, testing）'
+        required: false
+        default: 'trixie'
+      mpd_version:
+        description: 'MPD 版本号（留空 = Debian 源中的最新版，如 0.24.15）'
+        required: false
+        default: ''
+  schedule:
+    - cron: '0 6 1 * *'   # 每月 1 号 06:00 UTC
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  TZ: UTC
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # -----------------------------------------------------------
+      # 1. 设置 QEMU，使 Docker 能运行 arm64 容器
+      # -----------------------------------------------------------
+      - name: 设置 QEMU（支持 arm64 容器）
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # -----------------------------------------------------------
+      # 2. 在 arm64 Debian 容器中编译 MPD
+      # -----------------------------------------------------------
+      - name: 编译 MPD（arm64，禁用 io_uring）
+        run: |
+          mkdir -p output
+
+          # 确定 Debian 发行版（手动触发时可自定义）
+          RELEASE="${{ inputs.debian_release || 'trixie' }}"
+
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "${{ github.workspace }}/output:/output" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=UTC \
+            -e DEB_RELEASE="${{ inputs.debian_release || 'trixie' }}" \
+            "debian:${RELEASE}" bash -c '
+              set -eux
+
+              echo "========================================="
+              echo " 构建环境：Debian $(cat /etc/debian_version)"
+              echo " 架构：$(uname -m)"
+              echo "========================================="
+
+              # ----- 启用源码源 -----
+              echo "deb-src http://deb.debian.org/debian $DEB_RELEASE main" >> /etc/apt/sources.list
+              apt-get update
+
+              # ----- 安装构建依赖 -----
+              apt-get build-dep -y mpd
+
+              # ----- 下载 MPD 源码 -----
+              apt-get source mpd
+              cd mpd-*/
+
+              # ----- 修改 debian/rules：禁用 io_uring -----
+              sed -i "s/-Dio_uring=enabled/-Dio_uring=disabled/" debian/rules
+              echo "  [✓] debian/rules: io_uring → disabled"
+
+              # ----- 去掉 liburing-dev 依赖（可选，既然已经禁用）-----
+              sed -i "/liburing-dev/d" debian/control
+              echo "  [✓] debian/control: removed liburing-dev"
+
+              # ----- 标记自定义版本，避免和官方包混淆 -----
+              dch -l "+custom-io_uring-disabled" "Rebuild with io_uring disabled"
+              echo "  [✓] 版本标记完成"
+
+              # ----- 编译 -----
+              echo "========================================="
+              echo " 开始编译（并行数: $(nproc)）..."
+              echo "========================================="
+              DEB_BUILD_OPTIONS="parallel=$(nproc)" dpkg-buildpackage -us -uc -b
+
+              # ----- 复制产物到宿主机 -----
+              cd ..
+              echo "========================================="
+              echo " 编译完成，复制产物"
+              echo "========================================="
+              cp -v *.deb /output/
+              # 同时保存构建信息（可选）
+              cp -v *.buildinfo *.changes /output/ 2>/dev/null || true
+              ls -lh /output/
+            '
+
+          # 注意：DEB_RELEASE 通过 docker -e 传入容器
+
+      # -----------------------------------------------------------
+      # 3. 显示并上传编译产物
+      # -----------------------------------------------------------
+      - name: 列出产物
+        run: ls -lh output/
+
+      - name: 上传 .deb 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpd-deb-${{ inputs.debian_release || 'trixie' }}-arm64-io_uring-disabled
+          path: output/*.deb
+          if-no-files-found: error
+
+      - name: 上传构建信息（可选）
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpd-buildinfo-${{ inputs.debian_release || 'trixie' }}-arm64
+          path: output/*.buildinfo
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------
+  # 通知（可选）：编译失败时通知仓库管理员
+  # ---------------------------------------------------------------
+  notify-failure:
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 打印失败信息
+        run: |
+          echo "::warning::MPD 编译失败！请检查 workflow 日志。"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
