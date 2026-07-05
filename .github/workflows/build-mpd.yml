@@ -61,6 +61,8 @@ jobs:
             -v "${{ github.workspace }}/output:/output" \
             -e DEBIAN_FRONTEND=noninteractive \
             -e TZ=UTC \
+            -e DEBEMAIL=ci@localhost \
+            -e DEBFULLNAME=CI \
             -e DEB_RELEASE="${{ inputs.debian_release || 'trixie' }}" \
             "debian:${RELEASE}" bash -c '
               set -eux
@@ -91,7 +93,7 @@ jobs:
               echo "  [✓] debian/control: removed liburing-dev"
 
               # ----- 标记自定义版本，避免和官方包混淆 -----
-              dch -l "+custom-io_uring-disabled" "Rebuild with io_uring disabled"
+              dch -l "+custom-io-uring-disabled" "Rebuild with io_uring disabled"
               echo "  [✓] 版本标记完成"
 
               # ----- 编译 -----
